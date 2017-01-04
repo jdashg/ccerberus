@@ -158,10 +158,11 @@ def main(args):
         with schedaemon.ScheduledJob(PREPROC_PRIORITY, info):
             cc_key = get_cc_key(cc_bin)
             preproc_args = [cc_bin] + preproc_args + [source_file_name]
-            p = subprocess.Popen(preproc_args, stdout=subprocess.PIPE)
+            p = subprocess.Popen(preproc_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            (outdata, _) = p.communicate()
+            (outdata, errdata) = p.communicate()
             if p.returncode != 0:
+                sys.stderr.write(errdata)
                 sys.stdout.write(outdata)
                 exit(p.returncode)
 
@@ -198,9 +199,9 @@ def main(args):
         returncode = schedaemon_util.recv_n(conn, 1)[0]
 
         outdata = schedaemon_util.recv_buffer(conn)
-        sys.stdout.write(outdata)
         errdata = schedaemon_util.recv_buffer(conn)
         sys.stderr.write(errdata)
+        sys.stdout.write(outdata)
 
         if returncode != 0:
             return returncode
