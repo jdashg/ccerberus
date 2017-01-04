@@ -110,6 +110,11 @@ def accept_remote(conn, addr):
 if __name__ == '__main__':
     schedaemon_util.spawn_thread(schedaemon_util.serve_forever, (LOCAL_ADDR, accept_local))
     schedaemon_util.spawn_thread(schedaemon_util.serve_forever, (REMOTE_ADDR, accept_remote))
+
+    p = subprocess.Popen(('python2.7', 'schedaemon.py'), shell=True)
+    # Interestingly, spawning schedaemon here will always succeed.
+    # This extra schedaemon will fail to bind to addresses until another schedaemon exits.
+
     '''
     cpu_count = multiprocessing.cpu_count()
     for x in range(cpu_count):
@@ -119,5 +124,6 @@ if __name__ == '__main__':
         t.start()
         continue
     '''
+
     schedaemon_util.sleep_until_keyboard()
     exit(0)
