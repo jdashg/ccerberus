@@ -1,6 +1,5 @@
 from __future__ import print_function
 
-import math
 import socket
 import struct
 import threading
@@ -8,9 +7,18 @@ import time
 
 ####
 
-VERBOSE = 2
+VERBOSE = 0
 
 GAI_POLL_INTERVAL = 3.0
+
+####
+
+print_lock = threading.Lock()
+
+def debug_print(*args):
+    if VERBOSE >= 2:
+        with print_lock:
+            print(*args)
 
 ########################################
 
@@ -26,11 +34,9 @@ def spawn_thread(target, args, as_daemon=True):
 def sleep_until_keyboard():
     while True:
         try:
-            time.sleep(math.inf)
+            time.sleep(24 * 60 * 60) # float('inf') is 'too long'. :(
         except KeyboardInterrupt:
             return
-        except:
-            pass
 
 ########################################
 
@@ -76,6 +82,17 @@ def recv_buffer(conn):
     data_len = recv_struct(conn, '<Q')
     data = recv_n(conn, data_len)
     return data
+
+####
+
+def send_poke(conn):
+    conn.sendall(bytearray(1))
+    return
+
+
+def recv_poke(conn):
+    got = conn.recv(1)
+    return len(got) != 0
 
 ####
 
@@ -138,7 +155,7 @@ class WaitBeacon:
 ########################################
 
 def accept_thread(conn, addr, accept_func):
-    #print('accept_thread', conn, addr)
+    debug_print('accept_thread', conn, addr)
     try:
         accept_func(conn, addr)
     except (socket.error, socket.timeout) as e:
@@ -151,7 +168,7 @@ def accept_thread(conn, addr, accept_func):
 ####
 
 def listen_thread(s, accept_func, gai, gai_set):
-    #print('listen_thread', accept_func, gai)
+    debug_print('listen_thread', accept_func, gai)
     try:
         while True:
             try:
@@ -171,7 +188,7 @@ def listen_thread(s, accept_func, gai, gai_set):
 ####
 
 def serve_forever(addr, accept_func, gai_poll_interval=GAI_POLL_INTERVAL):
-    #print('serve_forever', addr, accept_func)
+    debug_print('serve_forever', addr, accept_func)
     gai_set = set()
     while True:
         (host, port) = addr
@@ -179,7 +196,7 @@ def serve_forever(addr, accept_func, gai_poll_interval=GAI_POLL_INTERVAL):
             if gai in gai_set:
                 continue
 
-            (family, socktype, proto, canonname, sockaddr) = gai
+            (family, socktype, proto, _, sockaddr) = gai
             s = socket.socket(family, socktype, proto)
             try:
                 s.bind(sockaddr)

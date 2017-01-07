@@ -15,7 +15,7 @@ import schedaemon_util
 VERBOSE = 2
 
 ADDR = ('localhost', 47955)
-TIMEOUT = 0.100
+NET_TIMEOUT = 0.100
 
 PRIORITY_STRUCT = '<b'
 INFO_LEN_STRUCT = '<B'
@@ -123,11 +123,10 @@ def sched_accept(conn, addr):
     if VERBOSE >= 2:
         print('new conn: ', addr)
 
-    conn.settimeout(TIMEOUT)
+    conn.settimeout(NET_TIMEOUT)
     try:
         priority = schedaemon_util.recv_struct(conn, PRIORITY_STRUCT)
-        info_len = schedaemon_util.recv_struct(conn, INFO_LEN_STRUCT)
-        info = str(schedaemon_util.recv_n(conn, info_len))
+        info = str(schedaemon_util.recv_buffer(conn))
 
     except (socket.timeout, socket.error, schedaemon_util.ExSocketClosed):
         return
@@ -144,7 +143,6 @@ def sched_accept(conn, addr):
     conn.setblocking(True)
 
     try:
-        time.sleep(0.3) # XXX
         job.begin_event.wait()
         if VERBOSE >= 1:
             start = time.time()
@@ -171,47 +169,57 @@ class ExError(Exception):
     pass
 
 class ScheduledJob:
-    def __init__(self, priority=0, info='', timeout=TIMEOUT):
+    def __init__(self, priority=0, info=''):
+        assert len(info) < 1024
         self.priority = priority
         self.info = info
         self.conn = None
 
         try:
-            conn = socket.create_connection(ADDR, timeout)
+            conn = socket.create_connection(ADDR, NET_TIMEOUT)
             schedaemon_util.send_struct(conn, PRIORITY_STRUCT, self.priority)
-            schedaemon_util.send_struct(conn, INFO_LEN_STRUCT, len(self.info))
-            conn.sendall(self.info)
+            schedaemon_util.send_buffer(conn, self.info)
         except socket.error:
             raise ExTimeout()
 
         self.conn = conn
         return
 
+    ####
 
-    def _acquire(self, timeout=None):
+    def acquire(self, timeout=None):
         assert self.conn
         self.conn.settimeout(timeout)
+
+        read = None
         try:
             read = self.conn.recv(1)
-        except socket.timeout:
-            return False
+            # Else, socket must be dead.
+        except:
+            pass
 
-        if not read: # Socket must be dead
-            return False
+        if not read:
+            self.cancel()
 
-        return True
+        return bool(read)
 
+
+    def cancel(self):
+        if self.conn:
+            schedaemon_util.kill_socket(self.conn)
+        self.conn = None
+        return
+
+    ####
 
     def __enter__(self):
-        if not self._acquire(None):
+        if not self.acquire(None):
             raise ExError()
         return self
 
 
     def __exit__(self, ex_type, ex_val, ex_traceback):
-        if self.conn:
-            schedaemon_util.kill_socket(self.conn)
-        self.conn = None
+        self.cancel()
         return
 
 ########################################

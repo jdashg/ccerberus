@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 
+import marshal
 import os
 import socket
 import subprocess
@@ -15,7 +16,7 @@ import schedaemon_util
 VERBOSE = 2
 LOCAL_TIMEOUT = 0.100
 SHIM_OUT_PRIORITY = 0
-PREPROC_PRIORITY = ccerbd.COMPILE_PRIORITY + 1
+PREPROC_PRIORITY = -1
 
 
 class ExShimOut(Exception):
@@ -62,15 +63,7 @@ EXAMPLE_CL_ARGS = [
     'c:/dev/mozilla/gecko-cinn3-obj/dom/canvas/Unified_cpp_dom_canvas1.cpp'
 ]
 
-'''
-def connect(host, port):
-    gai_list = socket.getaddrinfo(self.host, self.port)
-    for (family, socktype, proto, canonname, sockaddr) in gai_list:
-        s = socket.socket(family, socktype, proto)
-        s.connect(
-
-        return s
-'''
+####
 
 def process_args(args):
     args = args[:]
@@ -129,18 +122,6 @@ def process_args(args):
 
 ####
 
-def get_cc_key(cc):
-    p = subprocess.Popen([cc, '-v'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    (_, errdata) = p.communicate()
-
-    cc_key = errdata.splitlines()[0]
-    if VERBOSE >= 2:
-        print('cc_key:', cc_key, file=sys.stderr)
-
-    return cc_key
-
-####
-
 def main(args):
     assert len(args) >= 1
 
@@ -156,7 +137,7 @@ def main(args):
     try:
         info = 'ccerb-preproc: {}'.format(source_file_name)
         with schedaemon.ScheduledJob(PREPROC_PRIORITY, info):
-            cc_key = get_cc_key(cc_bin)
+            cc_key = ccerbd.get_cc_key(cc_bin)
             preproc_args = [cc_bin] + preproc_args + [source_file_name]
             p = subprocess.Popen(preproc_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -169,51 +150,91 @@ def main(args):
             preproc_data = outdata
     except schedaemon.ExTimeout:
         print('ERROR: Missing `schedaemon`.', file=sys.stderr)
-        return 1
-    except schedaemon.ExError:
-        print('Warning: Unexpected disconnect from schedaemon.', file=sys.stderr)
-        raise ExShimOut('schedaemon disconnected')
+        return 1 # Will oversubscribe heavily without schedaemon.
 
     #print(preproc_data)
     #exit(0)
 
     ####
 
-    try:
-        conn = socket.create_connection(ccerbd.LOCAL_ADDR, LOCAL_TIMEOUT)
-    except socket.timeout:
-        print('ERROR: Missing `ccerbd`.', file=sys.stderr)
-        return 1
+    while True:
+        try:
+            local_conn = socket.create_connection(ccerbd.LOCAL_ADDR, LOCAL_TIMEOUT)
+        except socket.timeout:
+            print('ERROR: Missing `ccerbd`.', file=sys.stderr)
+            return 1 # Exit, since even shimming out is strictly slower than normal.
 
-    # Ok, now send (cc_key, compile_args, preproc_data)
+        try:
+            schedaemon_util.send_buffer(local_conn, cc_key)
+
+            local_conn.settimeout(None)
+            remote_gai_str = str(schedaemon_util.recv_buffer(local_conn))
+            reconn_token = schedaemon_util.recv_buffer(local_conn)
+        except  (socket.error, schedaemon_util.ExSocketClosed) as e:
+            if VERBOSE >= 1:
+                print('Warning: Failed to request remote compile addr. ({})'.format(e),
+                      file=sys.stderr)
+            raise ExShimOut('no remote compile addr')
+        finally:
+            schedaemon_util.kill_socket(local_conn)
+
+        ####
+
+        remote_gai = marshal.loads(remote_gai_str)
+        (family, socktype, proto, _, sockaddr) = remote_gai
+
+        ####
+
+        try:
+            remote_conn = socket.socket(family, socktype, proto)
+            remote_conn.connect(sockaddr)
+        except (socket.error, socket.timeout) as e:
+            print('Failed to connect to remote addr ({}): {}'.format(remote_gai, e))
+            continue
+
+        try:
+            schedaemon_util.send_buffer(remote_conn, reconn_token)
+            returncode = remote_compile_client(remote_conn, source_file_name,
+                                               compile_args, preproc_data)
+        except (socket.error, socket.timeout, schedaemon_util.ExSocketClosed) as e:
+            print('Remote compile failed ({}): {}'.format(remote_gai, e))
+            continue
+        finally:
+            schedaemon_util.kill_socket(remote_conn)
+
+        break
+
+    ####
+
+    return returncode
+
+####
+
+def remote_compile_client(conn, source_file_name, compile_args, source_data):
     conn.settimeout(None)
-
-    schedaemon_util.send_buffer(conn, cc_key)
     schedaemon_util.send_buffer(conn, source_file_name)
-    schedaemon_util.send_struct(conn, '<Q', len(compile_args))
-    for x in compile_args:
-        schedaemon_util.send_buffer(conn, x)
-    schedaemon_util.send_buffer(conn, preproc_data)
+    compile_args_str = '\0'.join(compile_args)
+    schedaemon_util.send_buffer(conn, compile_args_str)
+    schedaemon_util.send_buffer(conn, source_data)
 
     try:
-        returncode = schedaemon_util.recv_n(conn, 1)[0]
-
+        returncode = schedaemon_util.recv_struct(conn, '<i')
         outdata = schedaemon_util.recv_buffer(conn)
         errdata = schedaemon_util.recv_buffer(conn)
+
         sys.stderr.write(errdata)
         sys.stdout.write(outdata)
 
-        if returncode != 0:
-            return returncode
-
         num_files = schedaemon_util.recv_struct(conn, '<Q')
+        output_files = []
         for i in range(num_files):
             file_name = str(schedaemon_util.recv_buffer(conn))
             file_data = schedaemon_util.recv_buffer(conn)
-            with open(file_name, 'wb') as f:
-                f.write(file_data)
+            output_files.append((file_name, file_data))
             continue
-        return 0
+
+        ccerbd.write_files('', output_files)
+        return returncode
     except schedaemon_util.ExSocketClosed:
         print('ERROR: `ccerb` socket closed early.', file=sys.stderr)
         return 1
