@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 import net_util
 
@@ -14,19 +15,40 @@ import net_util
 VERBOSE = 2
 CONFIG_PATH = os.path.expanduser('~/.ccerb.ini')
 CCERBD_LOCAL_ADDR = ('localhost', 14305)
-NET_TIMEOUT = 0.300
+CCERBD_LOG_ADDR = ('localhost', 14293)
+NET_TIMEOUT = 1.000
+
+####
+
+print_func = print
+
+def basic_log(msg):
+    print_func(msg, file=sys.stderr)
+
+log_func = basic_log
+
+####
+
+def v_log(v_level, fmt_str, *fmt_args):
+    if VERBOSE < v_level:
+        return
+    msg = fmt_str.format(*fmt_args)
+    log_func(msg)
 
 ####
 
 def get_job_key(job_bin):
     args = [job_bin, '-v']
-    print(args)
-    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except:
+        v_log(1, '<Popen({}) failed>', args)
+        raise
+
     (outdata, errdata) = p.communicate()
 
     job_key = errdata.splitlines()[0]
-    if VERBOSE >= 2:
-        print('get_job_key({}):'.format(args), job_key, file=sys.stderr)
+    v_log(3, '<<get_job_key({}): {}>>', args, job_key)
 
     return job_key
 
@@ -37,8 +59,7 @@ def read_files(root_dir):
     for cur_root, cur_dirs, cur_files in os.walk(root_dir):
         for x in cur_files:
             path = os.path.join(cur_root, x)
-            print('reading', path)
-
+            v_log(3, '<<read {}>>', path)
             with open(path, 'rb') as f:
                 data = f.read()
 
@@ -53,6 +74,7 @@ def write_files(root_dir, files):
         if dir_name:
             os.makedirs(dir_name)
         file_path = os.path.join(root_dir, file_rel_path)
+        v_log(3, '<<write {}>>', file_path)
         with open(file_path, 'wb') as f:
             f.write(file_data)
 
@@ -62,7 +84,7 @@ def recv_files(conn):
     file_count = net_util.recv_struct(conn, '<Q')
     files = []
     for _ in range(file_count):
-        name = str(net_util.recv_buffer(conn))
+        name = unicode(net_util.recv_buffer(conn))
         data = net_util.recv_buffer(conn)
         files.append((name, data))
     return files
@@ -179,3 +201,18 @@ class Future:
             return self.val[0]
         except IndexError:
             raise Rejection()
+
+####
+
+_time_split = time.time()
+def time_split():
+    global _time_split
+    was = _time_split
+    _time_split = time.time()
+    return _time_split - was
+
+def log_time_split(info):
+    if VERBOSE < 3:
+        return
+    ms = int(time_split() * 1000)
+    v_log(4, '<<[{}ms] {}>>', ms, info)

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 import ccerb
 import net_util
@@ -53,6 +54,25 @@ def process_args(args):
             is_compile_only = True
             continue
 
+        if cur == '-showIncludes':
+            preproc.append(cur)
+            preproc.append('-nologo')
+            continue
+
+        if cur == '-nologo':
+            preproc.append(cur)
+            compile.append(cur)
+            continue
+
+        if cur == '-I':
+            preproc.append(cur)
+            try:
+                next = args.pop(0)
+            except:
+                raise ExShimOut('missing arg after -I')
+            preproc.append(next)
+            continue
+
         if cur.startswith('-D') or cur.startswith('-I'):
             preproc.append(cur)
             continue
@@ -74,11 +94,12 @@ def process_args(args):
             if source_file_name:
                 raise ExShimOut('multiple source files')
 
-            if os.path.dirname(cur[2:]):
-                raise ExShimOut('source file is a path')
+            #if os.path.dirname(cur[2:]):
 
-            source_file_name = cur
-            pass
+            source_file_name = os.path.basename(cur)
+            preproc.append(cur)
+            compile.append(source_file_name)
+            continue
 
         compile.append(cur)
         continue
@@ -106,7 +127,9 @@ def run_remote_job_client(conn, job_args, input_files):
     errdata = net_util.recv_buffer(conn)
 
     sys.stderr.write(errdata)
+    #ccerb.v_log(1, 'errdata: {}', errdata)
     sys.stdout.write(outdata)
+    #ccerb.v_log(1, 'outdata: {}', outdata)
 
     output_files = ccerb.recv_files(conn)
 
@@ -115,8 +138,8 @@ def run_remote_job_client(conn, job_args, input_files):
 
 ####
 
-def preproc(cc_bin, preproc_args, source_file_name):
-    preproc_args = [cc_bin] + preproc_args + [source_file_name]
+def preproc(cc_bin, preproc_args):
+    preproc_args = [cc_bin] + preproc_args
     p = subprocess.Popen(preproc_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     (outdata, errdata) = p.communicate()
@@ -125,10 +148,10 @@ def preproc(cc_bin, preproc_args, source_file_name):
         sys.stdout.write(outdata)
         exit(p.returncode)
 
-    return outdata
+    return (outdata, errdata)
 
 ####
-
+'''
 EXAMPLE_CL_ARGS = [
     'cl.EXE', '-FoUnified_cpp_dom_canvas1.obj', '-c',
     '-Ic:/dev/mozilla/gecko-cinn3-obj/dist/stl_wrappers', '-DDEBUG=1', '-DTRACING=1',
@@ -166,7 +189,7 @@ EXAMPLE_CL_ARGS = [
     '-Ic:/dev/mozilla/gecko-cinn3-obj/dist/include/cairo', '-wd4312',
     'c:/dev/mozilla/gecko-cinn3-obj/dom/canvas/Unified_cpp_dom_canvas1.cpp'
 ]
-
+'''
 ####################
 
 def ccerbd_connect(addr):
@@ -222,37 +245,63 @@ def try_remote_conn(remote_conn, job_key, priority):
 
 ####################
 
+if ccerb.VERBOSE:
+    log_conn = socket.create_connection(ccerb.CCERBD_LOG_ADDR, 0.100)
+    def log_to_ccerbd(msg):
+        net_util.send_buffer(log_conn, msg)
+
+    ccerb.log_func = log_to_ccerbd
+
+####################
+
 # sys.argv: [ccerb.py, cl, foo.c]
 
 ccerb.nice_down()
 
 args = sys.argv[1:]
 #args = EXAMPLE_CL_ARGS
-print('args:', args)
+#print('args:', args)
+
+ccerb.log_time_split(11)
 
 conn = socket.create_connection(ccerb.CCERBD_LOCAL_ADDR, 0.100) # Fail local connect fast.
+ccerb.log_time_split(12)
+
 conn.settimeout(ccerb.NET_TIMEOUT)
 ccerbdd_addr = net_util.recv_pickle(conn)
+ccerb.log_time_split(13)
 
 try:
+    if not args:
+        raise ExShimOut('no args')
+
+    if args[0] == '--':
+        args.pop(0)
+
     cc_bin = args[0]
     cc_args = args[1:]
 
     cc_key = ccerb.get_job_key(cc_bin)
 
+    ccerb.log_time_split(21)
+
     ####
 
     (preproc_args, compile_args, source_file_name) = process_args(cc_args)
     info = 'ccerb-preproc: {}'.format(source_file_name)
-    #print('\npreproc_args:', preproc_args)
-    #print('\ncompile_args:', compile_args)
+
+    ccerb.v_log(3, '<<preproc_args: {}>>', preproc_args)
+    ccerb.v_log(3, '<<compile_args: {}>>', compile_args)
 
     ####
 
     ccerb.acquire_remote_job(conn, 'wait', PREPROC_PRIORITY)
 
     with net_util.WaitBeacon(conn):
-        preproc_data = preproc(cc_bin, preproc_args, source_file_name)
+        (preproc_data, show_includes) = preproc(cc_bin, preproc_args)
+        if '-showIncludes' in preproc_args:
+            sys.stdout.write(show_includes)
+            #ccerb.v_log(1, 'show_includes: {}', show_includes)
 
     ########
 
@@ -278,17 +327,24 @@ try:
     exit(returncode)
 
 except ExShimOut as e:
-    if ccerb.VERBOSE >= 1:
-        print('<shimming out: \'{}\'>'.format(e.reason), file=sys.stderr)
-    if ccerb.VERBOSE >= 2:
-        print('<shimming out args: {}>'.format(args), file=sys.stderr)
+    ccerb.log_time_split(51)
+    ccerb.v_log(1, '<shimming out: \'{}\'>', e.reason)
+    ccerb.v_log(2, '<<shimming out args: {}>>', args)
     pass
 
 ####
+ccerb.log_time_split(61)
 
 ccerb.acquire_remote_job(conn, 'wait', SHIM_OUT_PRIORITY)
+ccerb.log_time_split(62)
 
 with net_util.WaitBeacon(conn):
+    ccerb.log_time_split(63)
     p = subprocess.Popen(args)
+    ccerb.log_time_split(64)
     p.communicate()
-    exit(p.returncode)
+    ccerb.log_time_split(65)
+ccerb.log_time_split(66)
+net_util.kill_socket(conn)
+ccerb.log_time_split(67)
+exit(p.returncode)

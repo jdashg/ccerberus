@@ -101,7 +101,7 @@ def send_pickle(conn, data):
     return
 
 def recv_pickle(conn):
-    pdata = str(recv_buffer(conn))
+    pdata = recv_buffer(conn)
     data = pickle.loads(pdata)
     return data
 
@@ -150,6 +150,7 @@ class WaitBeacon:
 
         t = threading.Thread(name='WaitBeacon', target=WaitBeacon._thread,
                              args=(self,))
+        t.daemon = True
         t.start()
         return
 
@@ -181,12 +182,14 @@ class WaitBeacon:
 
 ########################################
 
+import traceback
 def accept_thread(conn, addr, accept_func):
     debug_print('accept_thread', conn, addr)
     try:
         accept_func(conn, addr)
     except (socket.error, socket.timeout) as e:
-        print('Uncaught error on accept_thread:', e)
+        print('Uncaught error on accept_thread: {}({})'.format(type(e), e))
+        traceback.print_exc()
         pass
 
     kill_socket(conn)
@@ -206,7 +209,7 @@ def listen_thread(s, accept_func, gai, gai_set):
             spawn_thread(accept_thread, (conn, addr, accept_func))
             continue
     except socket.error as e:
-        print('Failed to bind:', e)
+        print('Failed to bind:', e, file=sys.stderr)
         pass
 
     gai_set.remove(gai)

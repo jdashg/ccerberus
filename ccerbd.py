@@ -5,6 +5,7 @@ assert __name__ == '__main__'
 from collections import namedtuple
 
 import bisect
+import itertools
 import math
 import multiprocessing
 import os
@@ -38,6 +39,16 @@ PUBLIC_ADDR = ('', PUBLIC_PORT)
 
 JOB_MAP = dict()
 JOB_MAP['wait'] = net_util.wait_on_beacon
+
+####################
+
+print_lock = threading.Lock()
+
+def locked_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
+
+ccerb.print_func = locked_print
 
 ####################
 
@@ -188,14 +199,14 @@ SCHED = Scheduler(SLOT_COUNT)
 def acquire_and_run(conn, info):
     try:
         job_key = str(net_util.recv_buffer(conn))
-    except net_util.ExSocketClosed:
+    except (net_util.ExSocketClosed, socket.error):
         # This is a graceful exit.
         return False
 
     try:
         job_func = JOB_MAP[job_key]
     except KeyError:
-        print('[{}] Unrecognized job_key: {}'.format(info, job_key))
+        locked_print('[{}] Unrecognized job_key: {}'.format(info, job_key))
         return False
 
     priority = net_util.recv_byte(conn)
@@ -211,14 +222,18 @@ def acquire_and_run(conn, info):
 ########################################
 
 def accept(conn, host_info):
+    start = time.time()
     while acquire_and_run(conn, host_info):
         continue
+
+    diff = time.time() - start
+    diff = int(diff * 1000)
+    ccerb.v_log(2, '<~accept({}): {}ms>', host_info, diff)
     return
 
 
 def accept_public(conn, addr):
-    if ccerb.VERBOSE >= 2:
-        print('accept_public({})'.format(addr))
+    ccerb.v_log(2, 'accept_public({})', addr)
 
     conn.settimeout(ccerb.NET_TIMEOUT)
 
@@ -229,8 +244,7 @@ def accept_public(conn, addr):
 
 
 def accept_local(conn, addr):
-    if ccerb.VERBOSE >= 2:
-        print('accept_local({})'.format(addr))
+    ccerb.v_log(3, 'accept_local({})', addr)
 
     conn.settimeout(ccerb.NET_TIMEOUT)
 
@@ -243,10 +257,37 @@ def accept_local(conn, addr):
 
 ########################################
 
+log_counter = itertools.count(1)
+
+def accept_log(conn, addr):
+    conn.settimeout(None)
+
+    lines = []
+
+    try:
+        while True:
+            lines.append(unicode(net_util.recv_buffer(conn)))
+    except (net_util.ExSocketClosed, socket.error):
+        pass
+
+    if not lines:
+        return
+
+    log_id = next(log_counter)
+    prefix = u'[log {}] '.format(log_id)
+    sep = u'\n' + prefix
+    text = prefix + sep.join(lines)
+
+    locked_print(text)
+    return
+
+########################################
+
 ccerb.nice_down()
 
 net_util.spawn_thread(net_util.serve_forever, (PUBLIC_ADDR, accept_public))
 net_util.spawn_thread(net_util.serve_forever, (ccerb.CCERBD_LOCAL_ADDR, accept_local))
+net_util.spawn_thread(net_util.serve_forever, (ccerb.CCERBD_LOG_ADDR, accept_log))
 
 ####
 
