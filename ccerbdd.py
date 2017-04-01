@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
-
 from __future__ import print_function
+assert __name__ == '__main__'
 
 from collections import namedtuple
 

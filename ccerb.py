@@ -1,6 +1,5 @@
-assert __name__ != '__main__'
-
 from __future__ import print_function
+assert __name__ != '__main__'
 
 import os
 import socket
