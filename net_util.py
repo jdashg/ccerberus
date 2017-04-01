@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+import pickle
 import socket
 import struct
 import threading
@@ -73,6 +74,14 @@ def recv_struct(conn, format):
 
 ####
 
+def send_byte(conn, val):
+    send_struct(conn, '<B', val)
+
+def recv_byte(conn):
+    return recv_struct(conn, '<B')
+
+####
+
 def send_buffer(conn, data):
     send_struct(conn, '<Q', len(data))
     conn.sendall(data)
@@ -81,6 +90,18 @@ def send_buffer(conn, data):
 def recv_buffer(conn):
     data_len = recv_struct(conn, '<Q')
     data = recv_n(conn, data_len)
+    return data
+
+####
+
+def send_pickle(conn, data):
+    pdata = pickle.dumps(data)
+    send_buffer(conn, pdata)
+    return
+
+def recv_pickle(conn):
+    pdata = str(recv_buffer(conn))
+    data = pickle.loads(pdata)
     return data
 
 ####
@@ -147,10 +168,15 @@ class WaitBeacon:
 
     def signal(self):
         with self.lock:
-            assert not self.signaled
             self.signaled = True
             self.conn.sendall( bytearray([1]) )
             return
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, ex_type, ex_val, ex_traceback):
+        self.signal()
 
 ########################################
 

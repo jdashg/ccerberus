@@ -1,13 +1,15 @@
 #!/usr/bin/env python2
+assert __name__ == '__main__'
 
 from __future__ import print_function
 
 from collections import namedtuple
 
-import marshal
+import bisect
 import math
 import multiprocessing
 import os
+import select
 import shutil
 import socket
 import subprocess
@@ -16,36 +18,30 @@ import tempfile
 import time
 import threading
 
+import ccerb
 import schedaemon
-import schedaemon_util
+import net_util
+
+####################
+
+SLOT_COUNT = multiprocessing.cpu_count()
+
+CONFIG = ccerb.parse_ini(ccerb.CONFIG_PATH)
+assert 'bin' in CONFIG
+assert len(CONFIG['bin'])
+
+try:
+    PUBLIC_PORT = int(CONFIG[None]['port'])
+except KeyError:
+    (_, PUBLIC_PORT) = ccerb.CCERBD_LOCAL_ADDR
+PUBLIC_ADDR = ('', PUBLIC_PORT)
 
 ####
 
-VERBOSE = 2
-LOCAL_ADDR = ('localhost', 14304)
-REMOTE_ADDR = ('', 14305)
-REMOTE_NET_TIMEOUT = 0.300
-RECONN_TOKEN_BYTES = 16
+JOB_MAP = dict()
+JOB_MAP['wait'] = net_util.wait_on_beacon
 
-REMOTE_COMPILE_PRIORITY = -3
-
-####
-
-cc_key_map = dict()
-
-####
-
-def get_cc_key(cc_bin):
-    p = subprocess.Popen([cc_bin, '-v'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    (_, errdata) = p.communicate()
-
-    cc_key = errdata.splitlines()[0]
-    if VERBOSE >= 2:
-        print('cc_key:', cc_key, file=sys.stderr)
-
-    return cc_key
-
-####
+####################
 
 class ScopedTempDir:
     def __init__(self):
@@ -61,35 +57,9 @@ class ScopedTempDir:
 
 ####
 
-def read_files(root_dir):
-    ret = []
-    for cur_root, cur_dirs, cur_files in os.walk(root_dir):
-        for x in cur_files:
-            path = os.path.join(cur_root, x)
-            print('reading', path)
-
-            with open(path, 'rb') as f:
-                data = f.read()
-
-            rel_path = os.path.relpath(path, root_dir)
-            ret.append((rel_path, data))
-    return ret
-
-
-def write_files(root_dir, files):
-    for (file_rel_path, file_data) in files:
-        dir_name = os.path.dirname(file_rel_path)
-        if dir_name:
-            os.makedirs(dir_name)
-        file_path = os.path.join(root_dir, file_rel_path)
-        with open(file_path, 'wb') as f:
-            f.write(file_data)
-
-####
-
 def run_in_temp_dir(input_files, args):
     with ScopedTempDir() as temp_dir:
-        write_files(temp_dir.path, input_files)
+        ccerb.write_files(temp_dir.path, input_files)
 
         p = subprocess.Popen(args, cwd=temp_dir.path, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE)
@@ -102,219 +72,185 @@ def run_in_temp_dir(input_files, args):
             os.remove(file_path)
             continue
 
-        output_files = read_files(temp_dir.path)
+        output_files = ccerb.read_files(temp_dir.path)
 
     return (returncode, outdata, errdata, output_files)
 
 ####
 
-def remote_compile_server(conn, cc_bin):
-    conn.settimeout(None)
+def run_remote_job_server(conn, job_bin):
+    job_args = str(net_util.recv_buffer(conn))
+    job_args = job_args.split('\0')
 
-    try:
-        source_file_name = str(schedaemon_util.recv_buffer(conn))
-        compile_args_str = str(schedaemon_util.recv_buffer(conn))
-        compile_args = compile_args_str.split('\0')
-        source_data = schedaemon_util.recv_buffer(conn)
-    except schedaemon_util.ExSocketClosed:
-        return
+    input_files = ccerb.recv_files(conn)
 
-    input_files = [(source_file_name, source_data)]
-    args = [cc_bin] + compile_args + [source_file_name]
-    (returncode, outdata, errdata, output_files) = run_in_temp_dir(input_files, args)
+    with net_util.WaitBeacon(conn):
+        args = [job_bin] + job_args
+        (returncode, outdata, errdata, output_files) = run_in_temp_dir(input_files, args)
 
-    schedaemon_util.send_struct(conn, '<i', returncode)
-    schedaemon_util.send_buffer(conn, outdata)
-    schedaemon_util.send_buffer(conn, errdata)
-    schedaemon_util.send_struct(conn, '<Q', len(output_files))
-    for (name, data) in output_files:
-        schedaemon_util.send_buffer(conn, name)
-        schedaemon_util.send_buffer(conn, data)
+    net_util.send_struct(conn, '<i', returncode)
+    net_util.send_buffer(conn, outdata)
+    net_util.send_buffer(conn, errdata)
 
+    ccerb.send_files(conn, output_files)
     return
+
+####
+
+for (job_bin, _) in CONFIG['bin'].viewitems():
+    def job_func(conn):
+        return run_remote_job_server(conn, job_bin)
+
+    job_key = ccerb.get_job_key(job_bin)
+    JOB_MAP[job_key] = job_func
+    continue
 
 ########################################
 
-PendingReconnect = namedtuple('PendingReconnect', 'job, cc_bin, addr')
+class PriorityQueue:
+    def __init__(self):
+        self.list = []
+        return
 
-pending_reconnects_lock = threading.Lock()
-pending_reconnects = dict()
+    def pop(self):
+        return self.list.pop(0)
 
-def pop_pending_reconnect(reconn_token):
-    with pending_reconnects_lock:
-        ret = pending_reconnects[reconn_token]
-        del pending_reconnects[reconn_token]
+    def insert(self, elem):
+        bisect.insort_right(self.list, elem)
 
-    return ret
+    def remove(self, elem):
+        self.list.remove(elem)
 
 ####
 
-def thread__pending_compile_timeout(reconn_token):
-    time.sleep(REMOTE_NET_TIMEOUT)
-
-    try:
-        cur = pop_pending_reconnect(reconn_token)
-    except KeyError:
+class Scheduler:
+    def __init__(self, slots):
+        self.max_slots = slots
+        self.lock = threading.Lock()
+        self.pending = PriorityQueue()
+        self.active = set()
         return
 
-    addr = cur.addr
-    if VERBOSE >= 1:
-        print('[{}] Pending reconnect timed out: {}'.format(addr, reconn_token))
-    cur.job.cancel()
-    return
 
-####
-
-def accept_remote_notify(conn, addr):
-    if VERBOSE >= 2:
-        print('accept_remote_notify({})'.format(addr))
-
-    cc_key = str(schedaemon_util.recv_buffer(conn))
-    try:
-        cc_bin = cc_key_map[cc_key]
-    except KeyError:
-        print('[{}] Unrecognized cc_key: {}'.format(addr, cc_key))
-        return
-
-    info = 'ccerbd-compile@{}: {}'.format(addr, cc_key)
-    print(info)
-
-    while True:
+    def _process(self):
         try:
-            job = schedaemon.ScheduledJob(REMOTE_COMPILE_PRIORITY, info)
-        except schedaemon.ExTimeout:
+            while len(self.active) < self.max_slots:
+                cur = self.pending.pop()
+                self.active.add(cur)
+                cur.ready_event.set()
+        except IndexError:
+            pass
+
+
+    def enqueue(self, priority, info):
+        return Scheduler.TimeSlot(self, priority, info)
+
+
+    ####
+
+    class TimeSlot:
+        def __init__(self, scheduler, priority, info):
+            self.scheduler = scheduler
+            self.priority = priority
+            self.info = info
+            self.ready_event = threading.Event()
             return
 
-        if not job.acquire():
-            return
 
-        reconn_token = os.urandom(RECONN_TOKEN_BYTES)
-        with pending_reconnects_lock:
-            assert reconn_token not in pending_reconnects
-            pending_reconnects[reconn_token] = PendingReconnect(job, cc_bin, addr)
+        def __lt__(self, x):
+            return self.priority < x.priority
 
-        schedaemon_util.send_buffer(conn, reconn_token)
 
-        schedaemon_util.spawn_thread(thread__pending_compile_timeout, (reconn_token,))
+        def __enter__(self):
+            with self.scheduler.lock:
+                self.scheduler.pending.insert(self)
+                self.scheduler._process()
+            return self
 
-        conn.settimeout(None)
-        if not schedaemon_util.recv_poke(conn):
-            return
+
+        def acquire(self, timeout=None):
+            return self.ready_event.wait(timeout)
+
+
+        def __exit__(self, ex_type, ex_val, ex_traceback):
+            with self.scheduler.lock:
+                try:
+                    self.scheduler.active.remove(self)
+                except KeyError:
+                    self.scheduler.pending.remove(self)
+                self.scheduler._process()
+
 
 ####
 
-def accept_remote(conn, addr):
-    if VERBOSE >= 2:
-        print('accept_remote({})'.format(addr))
-
-    conn.settimeout(REMOTE_NET_TIMEOUT)
-    reconn_token = str(schedaemon_util.recv_buffer(conn))
-    if not reconn_token:
-        return accept_remote_notify(conn, addr)
-
-    ####
-
-    try:
-        cur = pop_pending_reconnect(reconn_token)
-    except KeyError:
-        return
-
-    cc_bin = cur.cc_bin
-    job = cur.job
-
-    ####
-
-    remote_compile_server(conn, cc_bin)
-    job.cancel()
-
-    return
+SCHED = Scheduler(SLOT_COUNT)
 
 ########################################
 
-def acquire_remote(cc_key):
-    addr_list = [REMOTE_ADDR]
-
-    gai_list = []
-    for (host, port) in addr_list:
-        gai_list += socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-
-    for gai in gai_list:
-        print('gai:', gai)
-        (family, socktype, proto, _, sockaddr) = gai
-        remote_conn = None
-        try:
-            remote_conn = socket.socket(family, socktype, proto)
-            remote_conn.settimeout(REMOTE_NET_TIMEOUT)
-            remote_conn.connect(sockaddr)
-        except (socket.error, socket.timeout) as e:
-            if remote_conn:
-                schedaemon_util.kill_socket(remote_conn)
-            print('gai failed:', e)
-            continue
-        break
-    else:
-        print('out of gai')
-        return (None, None)
+def acquire_and_run(conn, info):
+    try:
+        job_key = str(net_util.recv_buffer(conn))
+    except net_util.ExSocketClosed:
+        # This is a graceful exit.
+        return False
 
     try:
-        schedaemon_util.send_buffer(remote_conn, '') # no token
-        schedaemon_util.send_buffer(remote_conn, cc_key)
+        job_func = JOB_MAP[job_key]
+    except KeyError:
+        print('[{}] Unrecognized job_key: {}'.format(info, job_key))
+        return False
 
-        remote_conn.settimeout(None)
-        reconn_token = str(schedaemon_util.recv_buffer(remote_conn))
-        return (gai, reconn_token)
-    except schedaemon_util.ExSocketClosed:
-        print('no token')
-        return (None, None)
-    finally:
-        schedaemon_util.kill_socket(remote_conn)
+    priority = net_util.recv_byte(conn)
 
-####
+    with SCHED.enqueue(priority, info) as timeslot:
+        while not timeslot.acquire(conn.gettimeout() * 0.5):
+            net_util.send_byte(conn, 0)
+        net_util.send_byte(conn, 1)
+
+        job_func(conn)
+    return True
+
+########################################
+
+def accept(conn, host_info):
+    while acquire_and_run(conn, host_info):
+        continue
+    return
+
+
+def accept_public(conn, addr):
+    if ccerb.VERBOSE >= 2:
+        print('accept_public({})'.format(addr))
+
+    conn.settimeout(ccerb.NET_TIMEOUT)
+
+    host_info = str(net_util.recv_buffer(conn))
+    host_info = '{}@{}'.format(host_info, addr)
+    accept(conn, host_info)
+    return
+
 
 def accept_local(conn, addr):
-    if VERBOSE >= 2:
+    if ccerb.VERBOSE >= 2:
         print('accept_local({})'.format(addr))
 
-    cc_key = str(schedaemon_util.recv_buffer(conn))
-    try:
-        cc_bin = cc_key_map[cc_key]
-    except KeyError:
-        print('[{}] Unrecognized cc_key: {}'.format(addr, cc_key))
-        return
+    conn.settimeout(ccerb.NET_TIMEOUT)
 
-    ####
+    ccerbdd_addr = None
+    net_util.send_pickle(conn, ccerbdd_addr)
 
-    (remote_gai, reconn_token) = acquire_remote(cc_key)
-    if not remote_gai:
-        print('[{}] Failed to find remotes for: {}'.format(addr, cc_key))
-        return
-
-    remote_gai_str = marshal.dumps(remote_gai)
-    schedaemon_util.send_buffer(conn, remote_gai_str)
-    schedaemon_util.send_buffer(conn, reconn_token)
+    host_info = 'localhost'
+    accept(conn, host_info)
     return
 
 ########################################
 
-if __name__ == '__main__':
-    cc_list = ['cl']
-    for cc_bin in cc_list:
-        cc_key = get_cc_key(cc_bin)
-        cc_key_map[cc_key] = cc_bin
-        continue
+ccerb.nice_down()
 
-    ####
+net_util.spawn_thread(net_util.serve_forever, (PUBLIC_ADDR, accept_public))
+net_util.spawn_thread(net_util.serve_forever, (ccerb.CCERBD_LOCAL_ADDR, accept_local))
 
-    p = subprocess.Popen(('python2.7', 'schedaemon.py'), shell=True)
-    # Interestingly, spawning schedaemon here will always succeed.
-    # This extra schedaemon will fail to bind to addresses until another schedaemon exits.
+####
 
-    ####
-
-    schedaemon_util.spawn_thread(schedaemon_util.serve_forever, (REMOTE_ADDR, accept_remote))
-    schedaemon_util.spawn_thread(schedaemon_util.serve_forever, (LOCAL_ADDR, accept_local))
-
-    ####
-
-    schedaemon_util.sleep_until_keyboard()
-    exit(0)
+net_util.sleep_until_keyboard()
+exit(0)
