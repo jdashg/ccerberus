@@ -25,6 +25,7 @@ CONFIG = ccerb.parse_ini(ccerb.CONFIG_PATH)
 assert 'dedicated_remotes' in CONFIG
 
 HOST_INFO = CONFIG[None]['host_info']
+NO_LOCAL = CONFIG[None].get('local_only', False)
 
 ####################
 
@@ -255,13 +256,16 @@ try:
 
     ########
 
-    t = threading.Thread(target=try_remote_conn,
-                         args=(conn, cc_key, LOCAL_COMPILE_PRIORITY))
-    t.daemon = True
-    t.start()
+    if not NO_LOCAL:
+        t = threading.Thread(target=try_remote_conn,
+                             args=(conn, cc_key, LOCAL_COMPILE_PRIORITY))
+        t.daemon = True
+        t.start()
 
-    for (addr, _) in CONFIG['dedicated_remotes']:
-        add_remote_addr(addr, cc_key, DEDICATED_COMPILE_PRIORITY)
+    for (host, port) in CONFIG['dedicated_remotes'].viewitems():
+        if not port:
+            (_, port) = ccerb.CCERBD_LOCAL_ADDR
+        add_remote_addr((host, port), cc_key, DEDICATED_COMPILE_PRIORITY)
 
     ####
 

@@ -18,7 +18,6 @@ import time
 import threading
 
 import ccerb
-import schedaemon
 import net_util
 
 ####################
