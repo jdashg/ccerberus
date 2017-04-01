@@ -26,7 +26,7 @@ CONFIG = ccerb.parse_ini(ccerb.CONFIG_PATH)
 assert 'dedicated_remotes' in CONFIG
 
 HOST_INFO = CONFIG[None]['host_info']
-NO_LOCAL = CONFIG[None].get('local_only', False)
+NO_LOCAL = int(CONFIG[None].get('no_local', 0))
 
 ####################
 
@@ -246,7 +246,8 @@ def try_remote_conn(remote_conn, job_key, priority):
 ####################
 
 if ccerb.VERBOSE:
-    log_conn = socket.create_connection(ccerb.CCERBD_LOG_ADDR, 0.100)
+    log_conn = socket.create_connection(ccerb.CCERBD_LOG_ADDR, 1.000)
+    log_conn.settimeout(None)
     def log_to_ccerbd(msg):
         net_util.send_buffer(log_conn, msg)
 
@@ -264,7 +265,7 @@ args = sys.argv[1:]
 
 ccerb.log_time_split(11)
 
-conn = socket.create_connection(ccerb.CCERBD_LOCAL_ADDR, 0.100) # Fail local connect fast.
+conn = socket.create_connection(ccerb.CCERBD_LOCAL_ADDR, 1.000) # Fail local connect fast.
 ccerb.log_time_split(12)
 
 conn.settimeout(ccerb.NET_TIMEOUT)
@@ -319,11 +320,17 @@ try:
     ####
 
     remote_conn = remotes_future.await()
+    ccerb.v_log(2, 'compiler addr: {}', remote_conn.getpeername())
 
     ########
 
     input_files = [(source_file_name, preproc_data)]
-    returncode = run_remote_job_client(remote_conn, compile_args, input_files)
+    try:
+        returncode = run_remote_job_client(remote_conn, compile_args, input_files)
+    except (socket.timeout, socket.error) as e:
+        raise ExShimOut('{}({})'.format(type(e), e))
+
+    net_util.kill_socket(remote_conn)
     exit(returncode)
 
 except ExShimOut as e:

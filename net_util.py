@@ -161,10 +161,10 @@ class WaitBeacon:
                     return
 
                 self.conn.sendall( bytearray([0]) )
-                wait_interval = self.conn.gettimeout() * 0.8
+                wait_interval = self.conn.gettimeout() * 0.7
 
-            if wait_interval >= 1.0:
-                wait_interval = 1.0
+            #if wait_interval >= 1.0:
+            #    wait_interval = 1.0
             time.sleep(wait_interval)
             continue
 
