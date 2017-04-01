@@ -134,10 +134,8 @@ def kill_socket(s):
 
 def wait_on_beacon(conn):
     assert conn.gettimeout() != None
-
-    while not recv_n(conn, 1)[0]:
+    while recv_byte(conn) == 0:
         continue
-    return
 
 
 class WaitBeacon:
@@ -160,7 +158,7 @@ class WaitBeacon:
                 if self.signaled:
                     return
 
-                self.conn.sendall( bytearray([0]) )
+                send_byte(self.conn, 0)
                 wait_interval = self.conn.gettimeout() * 0.7
 
             #if wait_interval >= 1.0:
@@ -170,8 +168,11 @@ class WaitBeacon:
 
     def signal(self):
         with self.lock:
+            if self.signaled:
+                return
+
             self.signaled = True
-            self.conn.sendall( bytearray([1]) )
+            send_byte(self.conn, 1)
             return
 
     def __enter__(self):

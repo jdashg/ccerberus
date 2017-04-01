@@ -70,8 +70,8 @@ def run_in_temp_dir(input_files, args):
     with ScopedTempDir() as temp_dir:
         ccerb.write_files(temp_dir.path, input_files)
 
-        p = subprocess.Popen(args, cwd=temp_dir.path, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
+        p = subprocess.Popen(args, bufsize=-1, cwd=temp_dir.path, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, universal_newlines=True)
         (outdata, errdata) = p.communicate()
         returncode = p.returncode
         assert returncode != None # Should have exited.

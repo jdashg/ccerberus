@@ -37,6 +37,9 @@ class ExShimOut(Exception):
 
 ####
 
+SOURCE_EXTS = ['c', 'cc', 'cpp']
+BOTH_ARGS = ['nologo', '-Tc', '-TC', '-Tp', '-TP']
+
 def process_args(args):
     args = args[:]
     if not args:
@@ -50,6 +53,9 @@ def process_args(args):
     while args:
         cur = args.pop(0)
 
+        if cur == '-E':
+            raise ExShimOut('preproc-only')
+
         if cur == '-c':
             is_compile_only = True
             continue
@@ -59,7 +65,7 @@ def process_args(args):
             preproc.append('-nologo')
             continue
 
-        if cur == '-nologo':
+        if cur in BOTH_ARGS:
             preproc.append(cur)
             compile.append(cur)
             continue
@@ -77,6 +83,9 @@ def process_args(args):
             preproc.append(cur)
             continue
 
+        if cur.startswith('-Tc') or cur.startswith('-Tp'):
+            raise ExShimOut('-Tp,-Tc unsupported')
+
         if cur == '-FI':
             preproc.append(cur)
             try:
@@ -89,8 +98,11 @@ def process_args(args):
         if cur.startswith('-Fo'):
             if os.path.dirname(cur[2:]):
                 raise ExShimOut('-Fo target is a path')
+            compile.append(cur)
+            continue
 
-        if cur.endswith('.c') or cur.endswith('.cc') or cur.endswith('.cpp'):
+        split = cur.rsplit('.', 1)
+        if len(split) == 2 and split[1].lower() in SOURCE_EXTS:
             if source_file_name:
                 raise ExShimOut('multiple source files')
 
@@ -140,7 +152,7 @@ def run_remote_job_client(conn, job_args, input_files):
 
 def preproc(cc_bin, preproc_args):
     preproc_args = [cc_bin] + preproc_args
-    p = subprocess.Popen(preproc_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen(preproc_args, bufsize=-1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
 
     (outdata, errdata) = p.communicate()
     if p.returncode != 0:
@@ -276,8 +288,7 @@ try:
     if not args:
         raise ExShimOut('no args')
 
-    if args[0] == '--':
-        args.pop(0)
+    ccerb.v_log(3, '<args: {}>>', args)
 
     cc_bin = args[0]
     cc_args = args[1:]
@@ -294,15 +305,14 @@ try:
     ccerb.v_log(3, '<<preproc_args: {}>>', preproc_args)
     ccerb.v_log(3, '<<compile_args: {}>>', compile_args)
 
+    has_show_includes = '-showIncludes' in preproc_args
+
     ####
 
     ccerb.acquire_remote_job(conn, 'wait', PREPROC_PRIORITY)
 
     with net_util.WaitBeacon(conn):
         (preproc_data, show_includes) = preproc(cc_bin, preproc_args)
-        if '-showIncludes' in preproc_args:
-            sys.stdout.write(show_includes)
-            #ccerb.v_log(1, 'show_includes: {}', show_includes)
 
     ########
 
@@ -329,6 +339,15 @@ try:
         returncode = run_remote_job_client(remote_conn, compile_args, input_files)
     except (socket.timeout, socket.error) as e:
         raise ExShimOut('{}({})'.format(type(e), e))
+
+    if has_show_includes:
+        try:
+            (file_name, rest) = show_includes.split('\n', 1)
+            assert file_name == source_file_name
+            sys.stdout.write(rest)
+            #ccerb.v_log(1, 'show_includes: {}', show_includes)
+        except ValueError:
+            pass
 
     net_util.kill_socket(remote_conn)
     exit(returncode)

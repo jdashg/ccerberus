@@ -40,7 +40,7 @@ def v_log(v_level, fmt_str, *fmt_args):
 def get_job_key(job_bin):
     args = [job_bin, '-v']
     try:
-        p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.Popen(args, bufsize=-1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except:
         v_log(1, '<Popen({}) failed>', args)
         raise
@@ -143,7 +143,12 @@ def parse_ini(path):
 
 ####
 
+ALLOW_NICE_DOWN = False
+
 def nice_down():
+    if not ALLOW_NICE_DOWN:
+        return
+
     if sys.platform == 'win32':
         import psutil
         p = psutil.Process()
