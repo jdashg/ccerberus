@@ -16,7 +16,8 @@ VERBOSE = 2
 CONFIG_PATH = os.path.expanduser('~/.ccerb.ini')
 CCERBD_LOCAL_ADDR = ('localhost', 14305)
 CCERBD_LOG_ADDR = ('localhost', 14293)
-NET_TIMEOUT = 1.000
+
+socket.setdefaulttimeout(3.0)
 
 ####
 

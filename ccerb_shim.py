@@ -205,7 +205,7 @@ EXAMPLE_CL_ARGS = [
 ####################
 
 def ccerbd_connect(addr):
-    remote_conn = socket.create_connection(addr, ccerb.NET_TIMEOUT)
+    remote_conn = socket.create_connection(addr)
     net_util.send_buffer(remote_conn, HOST_INFO)
     return remote_conn
 
@@ -258,7 +258,7 @@ def try_remote_conn(remote_conn, job_key, priority):
 ####################
 
 if ccerb.VERBOSE:
-    log_conn = socket.create_connection(ccerb.CCERBD_LOG_ADDR, 1.000)
+    log_conn = socket.create_connection(ccerb.CCERBD_LOG_ADDR)
     log_conn.settimeout(None)
     def log_to_ccerbd(msg):
         net_util.send_buffer(log_conn, msg)
@@ -277,10 +277,9 @@ args = sys.argv[1:]
 
 ccerb.log_time_split(11)
 
-conn = socket.create_connection(ccerb.CCERBD_LOCAL_ADDR, 1.000) # Fail local connect fast.
+conn = socket.create_connection(ccerb.CCERBD_LOCAL_ADDR)
 ccerb.log_time_split(12)
 
-conn.settimeout(ccerb.NET_TIMEOUT)
 ccerbdd_addr = net_util.recv_pickle(conn)
 ccerb.log_time_split(13)
 
@@ -366,10 +365,11 @@ ccerb.log_time_split(62)
 
 with net_util.WaitBeacon(conn):
     ccerb.log_time_split(63)
-    p = subprocess.Popen(args)
+    p = subprocess.Popen(args, buf_size=-1)
     ccerb.log_time_split(64)
     p.communicate()
     ccerb.log_time_split(65)
+
 ccerb.log_time_split(66)
 net_util.kill_socket(conn)
 ccerb.log_time_split(67)

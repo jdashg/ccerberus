@@ -235,8 +235,6 @@ def accept(conn, host_info):
 def accept_public(conn, addr):
     ccerb.v_log(2, 'accept_public({})', addr)
 
-    conn.settimeout(ccerb.NET_TIMEOUT)
-
     host_info = str(net_util.recv_buffer(conn))
     host_info = '{}@{}'.format(host_info, addr)
     accept(conn, host_info)
@@ -245,8 +243,6 @@ def accept_public(conn, addr):
 
 def accept_local(conn, addr):
     ccerb.v_log(3, 'accept_local({})', addr)
-
-    conn.settimeout(ccerb.NET_TIMEOUT)
 
     ccerbdd_addr = None
     net_util.send_pickle(conn, ccerbdd_addr)
