@@ -209,6 +209,22 @@ class Future:
 
 ####
 
+class PriorityQueue:
+    def __init__(self):
+        self.list = []
+        return
+
+    def pop(self):
+        return self.list.pop(0)
+
+    def insert(self, elem):
+        bisect.insort_right(self.list, elem)
+
+    def remove(self, elem):
+        self.list.remove(elem)
+
+####
+
 _time_split = time.time()
 def time_split():
     global _time_split

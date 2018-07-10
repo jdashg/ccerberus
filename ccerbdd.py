@@ -21,6 +21,22 @@ import ccerb
 import schedaemon
 import net_util
 
+'''
+Two main cases:
+* Almost empty
+* Almost full
+---
+workers pull when ready
+
+workers start activated:
+    loop:
+        if poll_for_job:
+
+---
+workers update  expiring 'empty slot counts', which we monotonically decrease as we assign
+jobs to workers
+'''
+
 ####
 
 service_map = dict()
@@ -29,7 +45,6 @@ conn_list_lock = threading.Lock()
 conn_list = []
 
 ####
-
 
 class Worker:
     def __init(self, addr, slots):
@@ -43,16 +58,26 @@ global_queue_lock = threading.Lock()
 class Job:
     id_counter = count(1)
 
-    def __init__(self, info):
+    def __init__(self, key, info):
         self.id = next(id_counter)
+        self.key = key
         self.worker = ccerb.Future()
         return
+
+    def __lt__(self, x):
+        return self.id < x.id
 
 
 class JobQueue:
     def __init__(self):
-        self.queue = collections.deque()
+        self.lock = threading.Lock()
+        self.queue = ccerb.PriorityQueue()
         return
+
+
+    def put(self, job):
+        with self.lock:
+            self.queue.insert(job)
 
 
     def next_id(self):
@@ -60,12 +85,6 @@ class JobQueue:
             return self.queue[0].id
         except IndexError:
             return float('+inf') # Sort empty queues to the back.
-
-
-    def __del__(self):
-        for job in self.queue:
-            job.worker.reject()
-        return
 
 
     def await_worker(self, info):
@@ -89,6 +108,23 @@ def get_next_job(job_queue_list):
         except IndexError:
             return None
 
+
+class JobServer:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.queues_by_key = dict()
+        return
+
+    def put(self, job):
+        with self.lock:
+            queue = self.setdefault(job.key, JobQueue())
+
+        queue.put(job)
+
+
+
+
+
 ####
 
 Worker = namedtuple('Worker', 'info, payload')
@@ -100,7 +136,7 @@ def accept_worker(conn, addr):
     payload = net_util.recv_buffer(conn)
     worker = Worker(info, payload)
 
-    job_keys = net_util.recv_buffer(conn)
+    job_keys = str(net_util.recv_buffer(conn))
     job_keys = job_keys.split('\0')
 
     job_queue_list = [job_queue_map.setdefault(x, JobQueue()) for x in job_keys]
@@ -118,10 +154,13 @@ def accept_worker(conn, addr):
 
 ####
 
-def accept_job(conn, addr):
+def accept(conn, addr):
     info = str(net_util.recv_buffer(conn))
-    job_key = net_util.recv_buffer(conn)
-    job_info = '{}@{}'.format(info, addr)
+    cmd = str(net_util.recv_buffer(conn))
+    if (cmd == 'put'):
+        job_key = str(net_util.recv_buffer(conn))
+        job_info = '{}@{}'.format(info, addr)
+
 
     try:
         job_queue = job_queue_map[job_key]

@@ -116,19 +116,6 @@ for (job_bin, _) in CONFIG['bin'].viewitems():
 
 ########################################
 
-class PriorityQueue:
-    def __init__(self):
-        self.list = []
-        return
-
-    def pop(self):
-        return self.list.pop(0)
-
-    def insert(self, elem):
-        bisect.insort_right(self.list, elem)
-
-    def remove(self, elem):
-        self.list.remove(elem)
 
 ####
 
